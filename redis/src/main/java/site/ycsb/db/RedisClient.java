@@ -28,7 +28,7 @@ import site.ycsb.ByteIterator;
 import site.ycsb.DB;
 import site.ycsb.DBException;
 import site.ycsb.Status;
-import site.ycsb.StringByteIterator;
+import site.ycsb.ByteArrayByteIterator;
 import redis.clients.jedis.BasicCommands;
 import redis.clients.jedis.HostAndPort;
 import redis.clients.jedis.Jedis;
@@ -41,8 +41,6 @@ import java.io.IOException;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.HashSet;
-import java.util.Iterator;
-import java.util.List;
 import java.util.Properties;
 import java.util.Set;
 import java.util.Vector;
@@ -119,64 +117,55 @@ public class RedisClient extends DB {
 
   @Override
   public Status read(String table, String key, Set<String> fields,
-      Map<String, ByteIterator> result) {
-    if (fields == null) {
-      StringByteIterator.putAllAsByteIterators(result, jedis.hgetAll(key));
-    } else {
-      String[] fieldArray =
-          (String[]) fields.toArray(new String[fields.size()]);
-      List<String> values = jedis.hmget(key, fieldArray);
-
-      Iterator<String> fieldIterator = fields.iterator();
-      Iterator<String> valueIterator = values.iterator();
-
-      while (fieldIterator.hasNext() && valueIterator.hasNext()) {
-        result.put(fieldIterator.next(),
-            new StringByteIterator(valueIterator.next()));
+                     Map<String, ByteIterator> result) {
+    try {
+      byte[] value = ((Jedis) jedis).get(key.getBytes());
+      if (value == null) {
+        return Status.NOT_FOUND;
       }
-      assert !fieldIterator.hasNext() && !valueIterator.hasNext();
+      result.put("value", new ByteArrayByteIterator(value));
+      return Status.OK;
+    } catch (Exception e) {
+      return Status.ERROR;
     }
-    return result.isEmpty() ? Status.ERROR : Status.OK;
   }
 
   @Override
-  public Status insert(String table, String key,
-      Map<String, ByteIterator> values) {
-    if (jedis.hmset(key, StringByteIterator.getStringMap(values))
-        .equals("OK")) {
-      jedis.zadd(INDEX_KEY, hash(key), key);
-      return Status.OK;
+  public Status insert(String table, String key, Map<String, ByteIterator> values) {
+    try {
+      ByteIterator v = values.values().iterator().next();
+      String reply = ((Jedis) jedis).set(key.getBytes(), v.toArray());
+      return ("OK".equals(reply) ? Status.OK : Status.ERROR);
+    } catch (Exception e) {
+      return Status.ERROR;
     }
-    return Status.ERROR;
   }
 
   @Override
   public Status delete(String table, String key) {
-    return jedis.del(key) == 0 && jedis.zrem(INDEX_KEY, key) == 0 ? Status.ERROR
-        : Status.OK;
-  }
-
-  @Override
-  public Status update(String table, String key,
-      Map<String, ByteIterator> values) {
-    return jedis.hmset(key, StringByteIterator.getStringMap(values))
-        .equals("OK") ? Status.OK : Status.ERROR;
-  }
-
-  @Override
-  public Status scan(String table, String startkey, int recordcount,
-      Set<String> fields, Vector<HashMap<String, ByteIterator>> result) {
-    Set<String> keys = jedis.zrangeByScore(INDEX_KEY, hash(startkey),
-        Double.POSITIVE_INFINITY, 0, recordcount);
-
-    HashMap<String, ByteIterator> values;
-    for (String key : keys) {
-      values = new HashMap<String, ByteIterator>();
-      read(table, key, fields, values);
-      result.add(values);
+    try {
+      Long ret = ((Jedis) jedis).del(key);
+      return (ret > 0 ? Status.OK : Status.NOT_FOUND);
+    } catch (Exception e) {
+      return Status.ERROR;
     }
-
-    return Status.OK;
   }
 
+
+  @Override
+  public Status update(String table, String key, Map<String, ByteIterator> values) {
+    try {
+      ByteIterator v = values.values().iterator().next();
+      String reply = ((Jedis) jedis).set(key.getBytes(), v.toArray());
+      return ("OK".equals(reply) ? Status.OK : Status.ERROR);
+    } catch (Exception e) {
+      return Status.ERROR;
+    }
+  }
+
+  @Override
+  public Status scan(String table, String startKey, int recordCount,
+                     Set<String> fields, Vector<HashMap<String, ByteIterator>> result) {
+    return Status.NOT_IMPLEMENTED;
+  }
 }
