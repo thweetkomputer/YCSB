@@ -38,7 +38,9 @@ import redis.clients.jedis.Protocol;
 
 import java.io.Closeable;
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.HashSet;
 import java.util.Properties;
@@ -103,6 +105,24 @@ public class RedisClient extends DB {
     }
   }
 
+  private interface RedisOp<T> {
+    T run() throws Exception;
+  }
+
+  private <T> T retryForever(RedisOp<T> op) {
+    for (;;) {
+      try {
+        return op.run();
+      } catch (Exception e) {
+        try {
+          Thread.sleep(5 * 60 * 1000L);
+        } catch (InterruptedException ex) {
+          Thread.currentThread().interrupt();
+        }
+      }
+    }
+  }
+
   /*
    * Calculate a hash for a key to store it in an index. The actual return value
    * of this function is not interesting -- it primarily needs to be fast and
@@ -113,51 +133,116 @@ public class RedisClient extends DB {
     return key.hashCode();
   }
 
-  // XXX jedis.select(int index) to switch to `table`
+  private byte[] serialize(Map<String, ByteIterator> values) {
+    int n = values.size();
+  
+    List<byte[]> keys = new ArrayList<>(n);
+    List<byte[]> vals = new ArrayList<>(n);
+  
+    int total = 4; // N
+    for (Map.Entry<String, ByteIterator> e : values.entrySet()) {
+      byte[] k = e.getKey().getBytes();
+      byte[] v = e.getValue().toArray();
+      keys.add(k);
+      vals.add(v);
+  
+      total += 4 + k.length; // k_len + k
+      total += 4 + v.length; // v_len + v
+    }
+  
+    byte[] buf = new byte[total];
+    int pos = 0;
+  
+    pos = writeInt(buf, pos, n);
+  
+    for (int i = 0; i < n; i++) {
+      byte[] k = keys.get(i);
+      byte[] v = vals.get(i);
+  
+      pos = writeInt(buf, pos, k.length);
+      System.arraycopy(k, 0, buf, pos, k.length);
+      pos += k.length;
+  
+      pos = writeInt(buf, pos, v.length);
+      System.arraycopy(v, 0, buf, pos, v.length);
+      pos += v.length;
+    }
+    return buf;
+  }
+  
+  private void deserialize(byte[] raw, Map<String, ByteIterator> out) {
+    int pos = 0;
+    int n = readInt(raw, pos);
+    pos += 4;
+  
+    for (int i = 0; i < n; i++) {
+      int klen = readInt(raw, pos);
+      pos += 4;
+      String k = new String(raw, pos, klen);
+      pos += klen;
+  
+      int vlen = readInt(raw, pos);
+      pos += 4;
+      byte[] v = new byte[vlen];
+      System.arraycopy(raw, pos, v, 0, vlen);
+      pos += vlen;
+  
+      out.put(k, new ByteArrayByteIterator(v));
+    }
+  }
+  
+  private int writeInt(byte[] buf, int pos, int v) {
+    buf[pos]     = (byte)(v >>> 24);
+    buf[pos + 1] = (byte)(v >>> 16);
+    buf[pos + 2] = (byte)(v >>>  8);
+    buf[pos + 3] = (byte)(v);
+    return pos + 4;
+  }
+  
+  private int readInt(byte[] buf, int pos) {
+    return ((buf[pos]     & 0xFF) << 24) |
+           ((buf[pos + 1] & 0xFF) << 16) |
+           ((buf[pos + 2] & 0xFF) <<  8) |
+           (buf[pos + 3] & 0xFF);
+  }
+
 
   @Override
-  public Status read(String table, String key, Set<String> fields,
-                     Map<String, ByteIterator> result) {
-    try {
-      byte[] value = ((Jedis) jedis).get(key.getBytes());
-      if (value == null) {
-        return Status.NOT_FOUND;
-      }
-      result.put("value", new ByteArrayByteIterator(value));
-      return Status.OK;
-    } catch (Exception e) {
-      return Status.ERROR;
-    }
+  public Status delete(String table, String key) {
+    return Status.NOT_IMPLEMENTED;
   }
 
   @Override
   public Status insert(String table, String key, Map<String, ByteIterator> values) {
     try {
-      ByteIterator v = values.values().iterator().next();
-      String reply = ((Jedis) jedis).set(key.getBytes(), v.toArray());
-      return ("OK".equals(reply) ? Status.OK : Status.ERROR);
+      return retryForever(() -> {
+          byte[] data = serialize(values);
+          String reply = ((Jedis) jedis).set(key.getBytes(), data);
+          return "OK".equals(reply) ? Status.OK : Status.ERROR;
+        });
     } catch (Exception e) {
       return Status.ERROR;
     }
   }
-
-  @Override
-  public Status delete(String table, String key) {
-    try {
-      Long ret = ((Jedis) jedis).del(key);
-      return (ret > 0 ? Status.OK : Status.NOT_FOUND);
-    } catch (Exception e) {
-      return Status.ERROR;
-    }
-  }
-
-
+  
   @Override
   public Status update(String table, String key, Map<String, ByteIterator> values) {
+    return Status.NOT_IMPLEMENTED;
+  }
+
+  @Override
+  public Status read(String table, String key, Set<String> fields,
+                     Map<String, ByteIterator> result) {
     try {
-      ByteIterator v = values.values().iterator().next();
-      String reply = ((Jedis) jedis).set(key.getBytes(), v.toArray());
-      return ("OK".equals(reply) ? Status.OK : Status.ERROR);
+      return retryForever(() -> {
+          byte[] raw = ((Jedis) jedis).get(key.getBytes());
+          deserialize(raw, result);
+  
+          if (fields != null) {
+            result.entrySet().removeIf(e -> !fields.contains(e.getKey()));
+          }
+          return Status.OK;
+        });
     } catch (Exception e) {
       return Status.ERROR;
     }
