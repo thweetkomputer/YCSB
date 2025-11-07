@@ -103,6 +103,24 @@ public class RedisClient extends DB {
     }
   }
 
+  private interface RedisOp<T> {
+    T run() throws Exception;
+  }
+
+  private <T> T retryForever(RedisOp<T> op) {
+    for (;;) {
+      try {
+        return op.run();
+      } catch (Exception e) {
+        try {
+          Thread.sleep(3 * 60 * 1000L);
+        } catch (InterruptedException ex) {
+          Thread.currentThread().interrupt();
+        }
+      }
+    }
+  }
+
   /*
    * Calculate a hash for a key to store it in an index. The actual return value
    * of this function is not interesting -- it primarily needs to be fast and
@@ -119,12 +137,14 @@ public class RedisClient extends DB {
   public Status read(String table, String key, Set<String> fields,
                      Map<String, ByteIterator> result) {
     try {
-      byte[] value = ((Jedis) jedis).get(key.getBytes());
-      if (value == null) {
-        return Status.NOT_FOUND;
-      }
-      result.put("value", new ByteArrayByteIterator(value));
-      return Status.OK;
+      return retryForever(() -> {
+          byte[] value = ((Jedis) jedis).get(key.getBytes());
+          if (value == null) {
+            return Status.NOT_FOUND;
+          }
+          result.put("value", new ByteArrayByteIterator(value));
+          return Status.OK;
+        });
     } catch (Exception e) {
       return Status.ERROR;
     }
@@ -133,9 +153,11 @@ public class RedisClient extends DB {
   @Override
   public Status insert(String table, String key, Map<String, ByteIterator> values) {
     try {
-      ByteIterator v = values.values().iterator().next();
-      String reply = ((Jedis) jedis).set(key.getBytes(), v.toArray());
-      return ("OK".equals(reply) ? Status.OK : Status.ERROR);
+      return retryForever(() -> {
+          ByteIterator v = values.values().iterator().next();
+          String reply = ((Jedis) jedis).set(key.getBytes(), v.toArray());
+          return ("OK".equals(reply) ? Status.OK : Status.ERROR);
+        });
     } catch (Exception e) {
       return Status.ERROR;
     }
@@ -143,24 +165,13 @@ public class RedisClient extends DB {
 
   @Override
   public Status delete(String table, String key) {
-    try {
-      Long ret = ((Jedis) jedis).del(key);
-      return (ret > 0 ? Status.OK : Status.NOT_FOUND);
-    } catch (Exception e) {
-      return Status.ERROR;
-    }
+    return Status.NOT_IMPLEMENTED;
   }
 
 
   @Override
   public Status update(String table, String key, Map<String, ByteIterator> values) {
-    try {
-      ByteIterator v = values.values().iterator().next();
-      String reply = ((Jedis) jedis).set(key.getBytes(), v.toArray());
-      return ("OK".equals(reply) ? Status.OK : Status.ERROR);
-    } catch (Exception e) {
-      return Status.ERROR;
-    }
+    return Status.NOT_IMPLEMENTED;
   }
 
   @Override
